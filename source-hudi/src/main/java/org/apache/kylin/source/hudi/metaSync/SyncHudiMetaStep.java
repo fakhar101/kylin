@@ -1,0 +1,74 @@
+package org.apache.kylin.source.hudi.metaSync;
+import com.google.common.collect.Maps;
+import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.util.Pair;
+import org.apache.kylin.job.common.PatternedLogger;
+import org.apache.kylin.job.exception.ExecuteException;
+import org.apache.kylin.job.exception.PersistentException;
+import org.apache.kylin.job.execution.AbstractExecutable;
+import org.apache.kylin.job.execution.ExecutableContext;
+import org.apache.kylin.job.execution.ExecuteResult;
+import org.apache.kylin.job.impl.threadpool.IJobRunner;
+import org.apache.kylin.metadata.model.DataModelDesc;
+import org.apache.kylin.metadata.model.JoinTableDesc;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.util.Locale;
+import java.util.Map;
+
+public class SyncHudiMetaStep extends AbstractExecutable {
+    private static final Logger logger = LoggerFactory.getLogger(SyncHudiMetaStep.class);
+    private final PatternedLogger stepLogger = new PatternedLogger(logger);
+    private DataModelDesc dataModelDesc = null;
+    
+    public void setCmd(String cmd){ setParam("cmd",cmd);}
+    
+    public SyncHudiMetaStep(DataModelDesc dataModelDesc) throws IOException {
+        this.dataModelDesc = dataModelDesc;
+    }
+    
+    public void syncHudiTables() throws IOException {
+        String cmd = getParam("cmd");
+        JoinTableDesc[] joinTableDescs = this.dataModelDesc.getJoinTables();
+        for(JoinTableDesc joinTable:joinTableDescs){
+            cmd = String.format(Locale.ROOT,"%s/run_sync_tool.sh "
+             + generateHudiConfigArgString(joinTable) + cmd, this.getConfig());
+            stepLogger.log(String.format(Locale.ROOT,"exe cmd:%s",cmd));
+            Pair<Integer,String> response = this.getConfig().getCliCommandExecutor().execute(cmd,stepLogger);
+            getManager().addJobInfo(getId(),stepLogger.getInfo());
+            if(response.getFirst()!=0){
+                throw new RuntimeException("Failed to Synchronize the Hudi metadata into hive, error code "+response.getFirst());
+            }
+        }
+    }
+
+    private String generateHudiConfigArgString(JoinTableDesc joinTable) {
+        KylinConfig kylinConfig = getConfig();
+        Map<String,String> config = Maps.newHashMap();
+        config.putAll(kylinConfig.parseHudiConfigParams());
+
+        StringBuilder args = new StringBuilder();
+        for(Map.Entry<String,String> entry:config.entrySet()){
+            args.append(" --"+ entry.getKey()+" "+ entry.getValue()+"\r\n");
+        }
+        args.append(" --table "+joinTable.getTable()+"\r\n");
+        return args.toString();
+    }
+
+    @Override
+    protected ExecuteResult doWork(ExecutableContext context, IJobRunner jobRunner) throws ExecuteException, PersistentException {
+        KylinConfig config = KylinConfig.getInstanceFromEnv();
+        try{
+            syncHudiTables();
+            return new ExecuteResult(ExecuteResult.State.SUCCEED,stepLogger.getBufferedLog());
+
+        }catch (Exception e){
+            logger.error("job:"+getId()+" execute finished with exception",e);
+            return new ExecuteResult(ExecuteResult.State.FAILED,stepLogger.getBufferedLog(),e);
+        }
+    }
+
+
+}
